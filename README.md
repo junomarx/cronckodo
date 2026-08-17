@@ -117,6 +117,48 @@ Details:
   rather than the first few being slightly favoured. `--seed N` makes the
   choice reproducible if you want to test.
 
+### Breaks
+
+Above a threshold, the day is booked as **two entries** with an unrecorded
+gap, rather than one implausible unbroken block:
+
+```bash
+clockodo.sh log --random-start 07:30-09:00 --duration 7h30m "Regular work"
+```
+
+```
+Mon 2026-08-17  07:45–15:45  7.50 h (7h 30m)
+  picked at random from 07:30–09:00 in 15-minute steps (7 options)
+  two entries, 30 min break at 12:00
+✓ 07:45–12:00 recorded (entry 4471203)
+✓ 12:30–15:45 recorded (entry 4471204)
+```
+
+```bash
+CLOCKODO_BREAK_DURATION="30m"   # empty or 0 disables breaks
+CLOCKODO_BREAK_AT="12:00"       # empty = always halfway through
+CLOCKODO_BREAK_AFTER="6h"       # only break when work exceeds this
+```
+
+Per run: `--break 45m`, `--break-at 13:00`, `--no-break`.
+
+Two things worth knowing about the arithmetic:
+
+- **With `--duration` the break extends the day.** `--duration 7h30m` means
+  7h30m of *recorded work*, so the day ends 30 minutes later than the start
+  plus the duration. **With `--until` the break is carved out of the span:**
+  `09:00-17:00` books 7h30m across two entries. Each reading is the natural
+  one for that flag, but they are opposites, so it's worth being deliberate
+  about which you use.
+- **If the configured break time doesn't fit, it falls back to halfway.**
+  A late start, a short day, or a randomised start that lands past the break
+  time would otherwise produce a zero-length or negative first segment. The
+  fallback lands on the step grid and says so in the output. Each segment is
+  required to be at least 15 minutes.
+
+If the second entry fails after the first succeeded, the first is deleted
+again — a half-booked day looks like a real one, which is worse than nothing.
+
 ### Aliases
 
 For combinations you use often, define aliases in the config:
@@ -195,16 +237,43 @@ one run and `clockodo.sh cache-clear` empties it.
 
 ### Running it unattended
 
+The intended deployment: a daily cron job on an always-on Linux box.
+
 ```cron
-# 18:30 Mon–Fri: book a standard day unless a guard says otherwise.
-# With CLOCKODO_RANDOM_START set, the start time varies between 07:30 and
-# 09:00 rather than being 09:00:00 every single day.
-30 18 * * 1-5  /usr/local/bin/clockodo.sh log --duration 8h "Regular work" --quiet
+MAILTO=you@example.com
+PATH=/usr/local/bin:/usr/bin:/bin
+
+# 18:30 Mon–Fri: book a standard day unless a guard says otherwise
+30 18 * * 1-5  /usr/local/bin/clockodo.sh log --duration 7h30m "Regular work" --quiet
 ```
 
-The weekday guard makes the `1-5` in the cron line redundant, but holidays,
-vacation and days you already tracked by hand are handled too — those are the
-cases cron cannot know about.
+`--quiet` is what makes the mail useful: on success and on an expected skip
+the script prints **nothing at all**, so cron sends no mail. Warnings and
+errors still go to stderr, so mail arrives only when something actually needs
+you — the API is down, credentials stopped working, an entry was rejected.
+Set `CLOCKODO_LOG=/var/log/clockodo.log` (or pass `--log`) to keep a one-line
+record of every run regardless:
+
+```
+2026-08-17 18:30:02+0200  LOG    2026-08-17  07:45-15:45  7.50 h (7h 30m) +30min break  entries: 4471203 4471204  Regular work
+2026-08-18 18:30:01+0200  SKIP   2026-08-18  public holiday: Assumption Day
+2026-08-19 18:30:04+0200  ERROR  HTTP 500 on /v2/entries: internal error
+```
+
+Notes for unattended runs:
+
+- The weekday guard makes the `1-5` in the cron line redundant, but holidays,
+  vacation and days you already tracked by hand are handled too — those are
+  the cases cron cannot know about.
+- Set `PATH` in the crontab. cron's default `PATH` is `/usr/bin:/bin`, which
+  misses `jq` on many installs. The script also appends `/usr/local/bin` and
+  `/opt/homebrew/bin` itself, and falls back to looking `HOME` up from the
+  passwd database if cron doesn't set it.
+- A lock (`$TMPDIR/clockodo-$UID.lock`) stops a scheduled run and a manual one
+  from booking the same day twice. A lock older than 5 minutes is treated as a
+  crashed run and reclaimed.
+- Re-running is safe: the existing-entries guard means a second run on the
+  same day does nothing.
 
 ## Reviewing and correcting
 
@@ -231,6 +300,8 @@ clockodo.sh delete 12345678            # entry IDs are shown by `list`
 | `check` | verify credentials, print resolved config and guards |
 | `init` | write the example config |
 | `cache-clear` | drop cached holiday/absence/user lookups |
+
+Global flags: `--config FILE`, `--log FILE`, `--refresh`, `-v`, `--version`.
 
 ## Notes
 
